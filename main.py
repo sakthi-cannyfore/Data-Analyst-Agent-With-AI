@@ -1,724 +1,3 @@
-# import os
-# import io
-# import json
-# import base64
-# import requests
-# import numpy as np
-# import pandas as pd
-# import faiss
-# from typing import List, Tuple, Optional
-# from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-# from fastapi.responses import JSONResponse
-# from bs4 import BeautifulSoup
-# from sentence_transformers import SentenceTransformer
-# import matplotlib.pyplot as plt
-# import time
-
-# from fastapi.middleware.cors import CORSMiddleware
-
-# origins = [
-#     "http://localhost:5500",
-#     "http://127.0.0.1:8000",
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-#     "*"
-# ]
-
-# def image_to_base64(image_bytes: bytes) -> str:
-#     """Convert image bytes to base64 string"""
-#     return base64.b64encode(image_bytes).decode("utf-8")
-
-# UPLOAD_DIR = "./uploaded_files"
-# PAGE_DIR = "./pages"
-# EMBED_DIR = "./embeddings"
-# os.makedirs(UPLOAD_DIR, exist_ok=True)
-# os.makedirs(PAGE_DIR, exist_ok=True)
-# os.makedirs(EMBED_DIR, exist_ok=True)
-
-# app = FastAPI(title="Dynamic URL + Questions + LLM + FAISS + Image Support")
-# embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# SUPPORTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"]
-
-
-# def read_questions_file(file_bytes: bytes) -> Tuple[str, List[str]]:
-#     try:
-#         content = file_bytes.decode("utf-8", errors="ignore").strip()
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Invalid file encoding. Must be UTF-8 text.")
-#     lines = [line.strip() for line in content.splitlines() if line.strip()]
-#     if not lines:
-#         raise HTTPException(status_code=400, detail="File is empty or invalid format.")
-#     url = lines[0]
-#     questions = lines[1:]
-#     return url, questions
-
-# def fetch_url_text_and_tables(url: str) -> Tuple[str, List[pd.DataFrame]]:
-#     headers = {"User-Agent": "Mozilla/5.0 (compatible; QuestionsBot/1.0)"}
-#     resp = requests.get(url, headers=headers, timeout=20)
-#     resp.raise_for_status()
-#     soup = BeautifulSoup(resp.text, "html.parser")
-#     for t in soup(["script", "style", "noscript", "iframe", "svg", "img"]):
-#         t.decompose()
-#     text = "\n".join([line.strip() for line in soup.get_text(separator="\n").splitlines() if line.strip()])
-#     tables: List[pd.DataFrame] = []
-#     try:
-#         for df in pd.read_html(resp.text):
-#             tables.append(df)
-#     except Exception:
-#         pass
-#     return text, tables
-
-# def save_page_text(url: str, text: str) -> str:
-#     safe_name = url.replace("://", "_").replace("/", "_")[:150]
-#     path = os.path.join(PAGE_DIR, f"{safe_name}.txt")
-#     with open(path, "w", encoding="utf-8") as f:
-#         f.write(text)
-#     return path
-
-# def chunk_text(text: str, max_chunk_tokens: int = 250) -> List[str]:
-#     blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
-#     chunks = []
-#     for block in blocks:
-#         words = block.split()
-#         start = 0
-#         while start < len(words):
-#             end = min(start + max_chunk_tokens, len(words))
-#             chunks.append(" ".join(words[start:end]))
-#             start = end
-#     return chunks
-
-# def build_faiss_index(chunks: List[str], embed_path: str):
-#     embs = embedding_model.encode(chunks, convert_to_numpy=True)
-#     embs /= np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
-#     index = faiss.IndexFlatIP(embs.shape[1])
-#     index.add(embs.astype("float32"))
-#     faiss.write_index(index, embed_path)
-#     with open(embed_path.replace(".index", "_meta.json"), "w", encoding="utf-8") as f:
-#         json.dump(chunks, f, indent=2, ensure_ascii=False)
-#     return index
-
-# def load_faiss_index(embed_path: str):
-#     index = faiss.read_index(embed_path)
-#     with open(embed_path.replace(".index", "_meta.json"), "r", encoding="utf-8") as f:
-#         chunks = json.load(f)
-#     return index, chunks
-
-# def search_similar_chunks(query: str, index, chunks: List[str], top_k: int = 5):
-#     q_emb = embedding_model.encode([query], convert_to_numpy=True)
-#     q_emb /= np.linalg.norm(q_emb) + 1e-12
-#     D, I = index.search(q_emb.astype("float32"), top_k)
-#     return [(chunks[i], float(D[0][j])) for j, i in enumerate(I[0]) if 0 <= i < len(chunks)]
-
-# def truncate_context(context: str, max_chars: int = 160000):
-#     return context if len(context) <= max_chars else context[:max_chars] + "\n...[truncated]..."
-
-# def detect_plot_request(question: str) -> bool:
-#     kws = ["plot", "scatter", "scatterplot", "chart", "draw scatter"]
-#     qlow = question.lower()
-#     return any(k in qlow for k in kws)
-
-# def select_xy_from_tables(question: str, tables: List[pd.DataFrame]):
-#     qlow = question.lower()
-#     for df in tables:
-#         cols = list(df.columns)
-#         best_pair = None
-#         for c1 in cols:
-#             for c2 in cols:
-#                 if c1 == c2:
-#                     continue
-#                 c1_nums = pd.to_numeric(df[c1], errors="coerce")
-#                 c2_nums = pd.to_numeric(df[c2], errors="coerce")
-#                 if c1_nums.notna().sum() >= max(1, len(df)//4) and c2_nums.notna().sum() >= max(1, len(df)//4):
-#                     name_match = str(c1).lower() in qlow or str(c2).lower() in qlow
-#                     if name_match:
-#                         return c1_nums.dropna(), c2_nums.dropna(), f"columns '{c1}' and '{c2}' matched"
-#                     if not best_pair:
-#                         best_pair = (c1_nums.dropna(), c2_nums.dropna(), f"columns '{c1}' and '{c2}' (first numeric pair)")
-#         if best_pair:
-#             return best_pair
-#     return None, None, "no suitable numeric columns"
-
-# def create_scatter_base64(x: List[float], y: List[float], title: str = "Scatter"):
-#     x = np.array(x)
-#     y = np.array(y)
-#     slope = intercept = corr = None
-#     if len(x) >= 2:
-#         slope, intercept = np.polyfit(x, y, 1)
-#         corr = float(np.corrcoef(x, y)[0,1])
-#     fig, ax = plt.subplots(figsize=(5,4), dpi=100)
-#     ax.scatter(x, y, alpha=0.8, s=40, edgecolor="k")
-#     if slope is not None:
-#         xs = np.linspace(min(x), max(x), 200)
-#         ax.plot(xs, slope*xs + intercept, "--", color="red", linewidth=2)
-#     ax.set_title(title)
-#     ax.set_xlabel("X")
-#     ax.set_ylabel("Y")
-#     ax.grid(True, linestyle="--", alpha=0.4)
-#     buf = io.BytesIO()
-#     plt.tight_layout()
-#     plt.savefig(buf, format="png", bbox_inches="tight")
-#     plt.close(fig)
-#     buf.seek(0)
-#     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}", slope, intercept, corr
-
-# def call_openrouter_chat(api_key: str, model: str, question: str, context_text: str, tables_json: List[dict]):
-#     context_text = truncate_context(context_text)
-#     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-#     system_prompt = (
-#         "You are an advanced data analyst assistant. "
-#         "Analyze CONTEXT, TABLES, QUESTION and give a precise one-line answer. "
-#         "Strict JSON format: {\"answers\": [\"...\"], \"computed\": {}, \"image\": null, \"sources\": [], \"warnings\": [], \"requires_external_data\": false}"
-#     )
-#     payload = {
-#         "model": model,
-#         "messages": [
-#             {"role": "system", "content": system_prompt},
-#             {"role": "user", "content": f"CONTEXT:\n{context_text}\n\nTABLES:\n{json.dumps(tables_json)}\n\nQUESTION:\n{question}"}
-#         ],
-#         "max_tokens": 800
-#     }
-#     resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-#     if resp.status_code != 200:
-#         raise HTTPException(status_code=500, detail=f"OpenRouter error: {resp.status_code} {resp.text}")
-#     try:
-#         content = resp.json()["choices"][0]["message"]["content"]
-#         if isinstance(content, str):
-#             return json.loads(content)
-#         return content
-#     except Exception:
-#         return {"raw_response": resp.json()}
-
-# def call_openrouter_image(api_key: str, image_b64: str, questions: List[str]):
-#     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-#     prompt_text = (
-#         "You are an expert AI image analyst. "
-#         "Analyze the image provided in '{image_b64} and answer all the {questions} and {prompt_text}provided. "
-#         "Strictly respond in JSON format: "
-#         "{\"answers\": [\"...\"], \"computed\": {}, \"image\": null, \"sources\": [], \"warnings\": [], \"requires_external_data\": false}"
-#     )
-#     questions_str = "\n".join(questions)
-
-#     payload = {
-#         "model": "google/gemini-2.5-flash",
-#         "messages": [
-#             {
-#                 "role": "system",
-#                 "content": "You are an AI assistant for analyzing images and answering questions."
-#             },
-#             {
-#                 "role": "user",
-#                 "content": [
-#                     {"type": "text", "text": prompt_text},
-#                     {"type": "image", "image_base64": image_b64},
-#                     {"type": "text", "text": f"Questions:\n{questions_str}"}
-#                 ]
-#             }
-#         ],
-#         "max_tokens": 500
-#     }
-
-#     resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-#     if resp.status_code != 200:
-#         raise HTTPException(status_code=500, detail=f"OpenRouter error: {resp.status_code} {resp.text}")
-    
-#     data = resp.json()
-#     try:
-#         content = data["choices"][0]["message"]["content"]
-#         if isinstance(content, str):
-#             content = content.replace("```json", "").replace("```", "").strip()
-#             return json.loads(content)
-#         return content
-#     except Exception:
-#         return {"raw_response": data}
-
-
-
-# @app.post("/upload")
-# async def upload_questions(
-#     file: UploadFile = File(...),
-#     api_key: str = Form(...),
-#     model: str = Form(...),
-#     top_k: int = Form(5),
-#     csv_file: Optional[UploadFile] = File(None),
-#     image_file: Optional[UploadFile] = File(None)
-# ):
-#     start_time = time.time()
-
-#     for folder in [UPLOAD_DIR, PAGE_DIR, EMBED_DIR]:
-#         for f in os.listdir(folder):
-#             os.remove(os.path.join(folder, f))
-
-#     if not file.filename.endswith(".txt"):
-#         raise HTTPException(status_code=400, detail="Only .txt files allowed.")
-
-#     content = await file.read()
-#     file_path = os.path.join(UPLOAD_DIR, file.filename)
-#     with open(file_path, "wb") as f:
-#         f.write(content)
-
-#     content_str = content.decode("utf-8", errors="ignore").strip()
-#     lines = [line.strip() for line in content_str.splitlines() if line.strip()]
-#     if not lines:
-#         raise HTTPException(status_code=400, detail="questions.txt is empty")
-#     first_line = lines[0]
-#     questions = lines[1:] if len(lines) > 1 else []
-
-#     if image_file:
-#         if image_file.content_type not in SUPPORTED_IMAGE_TYPES:
-#             raise HTTPException(status_code=400, detail="Unsupported image type")
-#         image_bytes = await image_file.read()
-#         image_b64 = image_to_base64(image_bytes)
-#         answers = call_openrouter_image(api_key, image_b64, questions)
-#         return JSONResponse(content={
-#             "mode": "image_analysis",
-#             "questions": questions,
-#             "answers": answers,
-#             "elapsed_time_seconds": time.time() - start_time
-#         })
-
-#     if first_line.startswith("http://") or first_line.startswith("https://"):
-#         url = first_line
-#         page_text, tables = fetch_url_text_and_tables(url)
-#         page_file = save_page_text(url, page_text)
-#         chunks = chunk_text(page_text)
-#     else:
-#         url = None
-#         if not csv_file:
-#             raise HTTPException(status_code=400, detail="No URL and no CSV file uploaded")
-#         csv_bytes = await csv_file.read()
-#         df = pd.read_csv(io.BytesIO(csv_bytes))
-#         tables = [df]
-#         chunks = []
-#         page_text = ""
-
-#     safe_name = (url or csv_file.filename).replace("://", "_").replace("/", "_")[:120]
-#     embed_path = os.path.join(EMBED_DIR, f"{safe_name}.index")
-#     index = build_faiss_index(chunks, embed_path) if chunks else None
-
-#     tables_json = [{"columns": df.columns.tolist(), "rows": df.fillna("").to_dict(orient="records")} for df in tables]
-
-#     results = []
-#     for q in questions:
-#         try:
-#             if detect_plot_request(q):
-#                 x_ser, y_ser, reason = select_xy_from_tables(q, tables)
-#                 if x_ser is not None and y_ser is not None and len(x_ser) >= 2:
-#                     n = min(len(x_ser), len(y_ser))
-#                     x_vals = pd.to_numeric(x_ser.iloc[:n], errors="coerce").dropna().tolist()
-#                     y_vals = pd.to_numeric(y_ser.iloc[:n], errors="coerce").dropna().tolist()
-#                     img_uri, slope, intercept, corr = create_scatter_base64(x_vals, y_vals, title=q)
-#                     results.append({
-#                         "question": q,
-#                         "answer": None,
-#                         "image": img_uri,
-#                         "computed": {"slope": slope, "intercept": intercept, "correlation": corr},
-#                         "context_used": [reason],
-#                         "warnings": []
-#                     })
-#                     continue
-
-#             context_for_llm = ""
-#             similar = []
-#             if index:
-#                 similar = search_similar_chunks(q, index, chunks, top_k)
-#                 context_for_llm = "\n\n".join([c for c, s in similar])
-
-#             llm_out = call_openrouter_chat(api_key, model, q, context_for_llm, tables_json)
-#             results.append({
-#                 "question": q,
-#                 "context_used": [{"chunk": c, "score": s} for c, s in similar],
-#                 "answer": llm_out
-#             })
-#         except Exception as e:
-#             results.append({"question": q, "error": str(e)})
-
-#     return JSONResponse(content={
-#         "mode": "web_or_csv_analysis",
-#         "elapsed_time_seconds": time.time() - start_time,
-#         "saved_as": file_path,
-#         "url": url,
-#         "page_saved_as": page_file if url else None,
-#         "csv_used": csv_file.filename if not url else None,
-#         "questions_count": len(questions),
-#         "results": results
-#     })
-
-
-
-
-
-####################################################### working code below #######################################################
-# import os
-# import io
-# import json
-# import base64
-# import requests
-# import numpy as np
-# import pandas as pd
-# import duckdb
-# from typing import List, Tuple, Optional
-# from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-# from fastapi.responses import JSONResponse
-# from bs4 import BeautifulSoup
-# from sentence_transformers import SentenceTransformer
-# import matplotlib.pyplot as plt
-# import time
-
-# from fastapi.middleware.cors import CORSMiddleware
-
-# origins = [
-#     "http://localhost:5500",
-#     "http://127.0.0.1:8000",
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-#     "*"
-# ]
-
-# def image_to_base64(image_bytes: bytes) -> str:
-#     return base64.b64encode(image_bytes).decode("utf-8")
-
-# UPLOAD_DIR = "./uploaded_files"
-# PAGE_DIR = "./pages"
-# EMBED_DIR = "./embeddings"
-# os.makedirs(UPLOAD_DIR, exist_ok=True)
-# os.makedirs(PAGE_DIR, exist_ok=True)
-# os.makedirs(EMBED_DIR, exist_ok=True)
-
-# app = FastAPI(title="Dynamic URL + Questions + LLM + DuckDB + Image Support")
-# embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# SUPPORTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"]
-
-# DUCKDB_PATH = os.path.join(EMBED_DIR, "embeddings.duckdb")
-# con = duckdb.connect(DUCKDB_PATH)
-# con.execute("""
-# CREATE TABLE IF NOT EXISTS embeddings (
-#     chunk_id INTEGER,
-#     text STRING,
-#     vector BLOB
-# )
-# """)
-
-# def read_questions_file(file_bytes: bytes) -> Tuple[str, List[str]]:
-#     try:
-#         content = file_bytes.decode("utf-8", errors="ignore").strip()
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Invalid file encoding. Must be UTF-8 text.")
-#     lines = [line.strip() for line in content.splitlines() if line.strip()]
-#     if not lines:
-#         raise HTTPException(status_code=400, detail="File is empty or invalid format.")
-#     url = lines[0]
-#     questions = lines[1:]
-#     return url, questions
-
-# def fetch_url_text_and_tables(url: str) -> Tuple[str, List[pd.DataFrame]]:
-#     headers = {"User-Agent": "Mozilla/5.0 (compatible; QuestionsBot/1.0)"}
-#     resp = requests.get(url, headers=headers, timeout=20)
-#     resp.raise_for_status()
-#     soup = BeautifulSoup(resp.text, "html.parser")
-#     for t in soup(["script", "style", "noscript", "iframe", "svg", "img"]):
-#         t.decompose()
-#     text = "\n".join([line.strip() for line in soup.get_text(separator="\n").splitlines() if line.strip()])
-#     tables: List[pd.DataFrame] = []
-#     try:
-#         for df in pd.read_html(resp.text):
-#             tables.append(df)
-#     except Exception:
-#         pass
-#     return text, tables
-
-# def save_page_text(url: str, text: str) -> str:
-#     safe_name = url.replace("://", "_").replace("/", "_")[:150]
-#     path = os.path.join(PAGE_DIR, f"{safe_name}.txt")
-#     with open(path, "w", encoding="utf-8") as f:
-#         f.write(text)
-#     return path
-
-# def chunk_text(text: str, max_chunk_tokens: int = 250) -> List[str]:
-#     blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
-#     chunks = []
-#     for block in blocks:
-#         words = block.split()
-#         start = 0
-#         while start < len(words):
-#             end = min(start + max_chunk_tokens, len(words))
-#             chunks.append(" ".join(words[start:end]))
-#             start = end
-#     return chunks
-
-# def build_duckdb_index(chunks: List[str]):
-#     embs = embedding_model.encode(chunks, convert_to_numpy=True)
-#     embs /= np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
-#     con.execute("DELETE FROM embeddings")  
-#     for i, vec in enumerate(embs):
-#         con.execute("INSERT INTO embeddings VALUES (?, ?, ?)", (i, chunks[i], vec.astype(np.float32).tobytes()))
-#     return chunks
-
-# def search_similar_chunks(query: str, index, chunks: List[str], top_k: int = 5):
-#     q_emb = embedding_model.encode([query], convert_to_numpy=True)[0]
-#     q_emb /= np.linalg.norm(q_emb) + 1e-12
-#     res = con.execute("SELECT chunk_id, text, vector FROM embeddings").fetchall()
-#     sims = []
-#     for chunk_id, text, vec_bytes in res:
-#         vec = np.frombuffer(vec_bytes, dtype=np.float32)
-#         score = float(np.dot(q_emb, vec))
-#         sims.append((text, score))
-#     sims.sort(key=lambda x: x[1], reverse=True)
-#     return sims[:top_k]
-
-# def truncate_context(context: str, max_chars: int = 160000):
-#     return context if len(context) <= max_chars else context[:max_chars] + "\n...[truncated]..."
-
-# def detect_plot_request(question: str) -> bool:
-#     kws = ["plot", "scatter", "scatterplot", "chart", "draw scatter"]
-#     qlow = question.lower()
-#     return any(k in qlow for k in kws)
-
-# def select_xy_from_tables(question: str, tables: List[pd.DataFrame]):
-#     qlow = question.lower()
-#     for df in tables:
-#         cols = list(df.columns)
-#         best_pair = None
-#         for c1 in cols:
-#             for c2 in cols:
-#                 if c1 == c2:
-#                     continue
-#                 c1_nums = pd.to_numeric(df[c1], errors="coerce")
-#                 c2_nums = pd.to_numeric(df[c2], errors="coerce")
-#                 if c1_nums.notna().sum() >= max(1, len(df)//4) and c2_nums.notna().sum() >= max(1, len(df)//4):
-#                     name_match = str(c1).lower() in qlow or str(c2).lower() in qlow
-#                     if name_match:
-#                         return c1_nums.dropna(), c2_nums.dropna(), f"columns '{c1}' and '{c2}' matched"
-#                     if not best_pair:
-#                         best_pair = (c1_nums.dropna(), c2_nums.dropna(), f"columns '{c1}' and '{c2}' (first numeric pair)")
-#         if best_pair:
-#             return best_pair
-#     return None, None, "no suitable numeric columns"
-
-# def create_scatter_base64(x: List[float], y: List[float], title: str = "Scatter"):
-#     x = np.array(x)
-#     y = np.array(y)
-#     slope = intercept = corr = None
-#     if len(x) >= 2:
-#         slope, intercept = np.polyfit(x, y, 1)
-#         corr = float(np.corrcoef(x, y)[0,1])
-#     fig, ax = plt.subplots(figsize=(5,4), dpi=100)
-#     ax.scatter(x, y, alpha=0.8, s=40, edgecolor="k")
-#     if slope is not None:
-#         xs = np.linspace(min(x), max(x), 200)
-#         ax.plot(xs, slope*xs + intercept, "--", color="red", linewidth=2)
-#     ax.set_title(title)
-#     ax.set_xlabel("X")
-#     ax.set_ylabel("Y")
-#     ax.grid(True, linestyle="--", alpha=0.4)
-#     buf = io.BytesIO()
-#     plt.tight_layout()
-#     plt.savefig(buf, format="png", bbox_inches="tight")
-#     plt.close(fig)
-#     buf.seek(0)
-#     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}", slope, intercept, corr
-
-# def call_openrouter_chat(api_key: str, model: str, question: str, context_text: str, tables_json: List[dict]):
-#     context_text = truncate_context(context_text)
-#     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-#     system_prompt = (
-#         "You are an advanced data analyst assistant. "
-#         "Analyze CONTEXT, TABLES, QUESTION and give a precise one-line answer. "
-#         "Strict JSON format: {\"answers\": [\"...\"], \"computed\": {}, \"image\": null, \"sources\": [], \"warnings\": [], \"requires_external_data\": false}"
-#     )
-#     payload = {
-#         "model": model,
-#         "messages": [
-#             {"role": "system", "content": system_prompt},
-#             {"role": "user", "content": f"CONTEXT:\n{context_text}\n\nTABLES:\n{json.dumps(tables_json)}\n\nQUESTION:\n{question}"}
-#         ],
-#         "max_tokens": 800
-#     }
-#     resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-#     if resp.status_code != 200:
-#         raise HTTPException(status_code=500, detail=f"OpenRouter error: {resp.status_code} {resp.text}")
-#     try:
-#         content = resp.json()["choices"][0]["message"]["content"]
-#         if isinstance(content, str):
-#             return json.loads(content)
-#         return content
-#     except Exception:
-#         return {"raw_response": resp.json()}
-
-# def call_openrouter_image(api_key: str, image_b64: str, questions: List[str]):
-#     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-#     prompt_text = (
-#         "You are an expert AI image analyst. "
-#         "Analyze the image provided in '{image_b64} and answer all the {questions} and {prompt_text}provided. "
-#         "Strictly respond in JSON format: "
-#         "{\"answers\": [\"...\"], \"computed\": {}, \"image\": null, \"sources\": [], \"warnings\": [], \"requires_external_data\": false}"
-#     )
-#     questions_str = "\n".join(questions)
-
-#     payload = {
-#         "model": "google/gemini-2.5-flash",
-#         "messages": [
-#             {
-#                 "role": "system",
-#                 "content": "You are an AI assistant for analyzing images and answering questions."
-#             },
-#             {
-#                 "role": "user",
-#                 "content": [
-#                     {"type": "text", "text": prompt_text},
-#                     {"type": "image", "image_base64": image_b64},
-#                     {"type": "text", "text": f"Questions:\n{questions_str}"}
-#                 ]
-#             }
-#         ],
-#         "max_tokens": 500
-#     }
-#     resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
-#     if resp.status_code != 200:
-#         raise HTTPException(status_code=500, detail=f"OpenRouter error: {resp.status_code} {resp.text}")
-    
-#     data = resp.json()
-#     try:
-#         content = data["choices"][0]["message"]["content"]
-#         if isinstance(content, str):
-#             content = content.replace("```json", "").replace("```", "").strip()
-#             return json.loads(content)
-#         return content
-#     except Exception:
-#         return {"raw_response": data}
-    
-# @app.post("/upload")
-# async def upload_questions(
-#     file: UploadFile = File(...),
-#     api_key: str = Form(...),
-#     model: str = Form(...),
-#     top_k: int = Form(5),
-#     csv_file: Optional[UploadFile] = File(None),
-#     image_file: Optional[UploadFile] = File(None)
-# ):
-#     start_time = time.time()
-
-#     for folder in [UPLOAD_DIR, PAGE_DIR]:
-#         for f in os.listdir(folder):
-#             os.remove(os.path.join(folder, f))
-
-#     if not file.filename.endswith(".txt"):
-#         raise HTTPException(status_code=400, detail="Only .txt files allowed.")
-
-#     content = await file.read()
-#     file_path = os.path.join(UPLOAD_DIR, file.filename)
-#     with open(file_path, "wb") as f:
-#         f.write(content)
-
-#     content_str = content.decode("utf-8", errors="ignore").strip()
-#     lines = [line.strip() for line in content_str.splitlines() if line.strip()]
-#     if not lines:
-#         raise HTTPException(status_code=400, detail="questions.txt is empty")
-#     first_line = lines[0]
-#     questions = lines[1:] if len(lines) > 1 else []
-
-#     if image_file:
-#         if image_file.content_type not in SUPPORTED_IMAGE_TYPES:
-#             raise HTTPException(status_code=400, detail="Unsupported image type")
-#         image_bytes = await image_file.read()
-#         image_b64 = image_to_base64(image_bytes)
-#         answers = call_openrouter_image(api_key, image_b64, questions)
-#         return JSONResponse(content={
-#             "mode": "image_analysis",
-#             "questions": questions,
-#             "answers": answers,
-#             "elapsed_time_seconds": time.time() - start_time
-#         })
-
-#     if first_line.startswith("http://") or first_line.startswith("https://"):
-#         url = first_line
-#         page_text, tables = fetch_url_text_and_tables(url)
-#         page_file = save_page_text(url, page_text)
-#         chunks = chunk_text(page_text)
-#     else:
-#         url = None
-#         if not csv_file:
-#             raise HTTPException(status_code=400, detail="No URL and no CSV file uploaded")
-#         csv_bytes = await csv_file.read()
-#         df = pd.read_csv(io.BytesIO(csv_bytes))
-#         tables = [df]
-#         chunks = []
-#         page_text = ""
-
-#     safe_name = (url or csv_file.filename).replace("://", "_").replace("/", "_")[:120]
-
-#     index = build_duckdb_index(chunks) if chunks else None
-
-#     tables_json = [{"columns": df.columns.tolist(), "rows": df.fillna("").to_dict(orient="records")} for df in tables]
-
-#     results = []
-#     for q in questions:
-#         try:
-#             if detect_plot_request(q):
-#                 x_ser, y_ser, reason = select_xy_from_tables(q, tables)
-#                 if x_ser is not None and y_ser is not None and len(x_ser) >= 2:
-#                     n = min(len(x_ser), len(y_ser))
-#                     x_vals = pd.to_numeric(x_ser.iloc[:n], errors="coerce").dropna().tolist()
-#                     y_vals = pd.to_numeric(y_ser.iloc[:n], errors="coerce").dropna().tolist()
-#                     img_uri, slope, intercept, corr = create_scatter_base64(x_vals, y_vals, title=q)
-#                     results.append({
-#                         "question": q,
-#                         "answer": None,
-#                         "image": img_uri,
-#                         "computed": {"slope": slope, "intercept": intercept, "correlation": corr},
-#                         "context_used": [reason],
-#                         "warnings": []
-#                     })
-#                     continue
-
-#             context_for_llm = ""
-#             similar = []
-#             if index:
-#                 similar = search_similar_chunks(q, index, chunks, top_k)
-#                 context_for_llm = "\n\n".join([c for c, s in similar])
-
-#             llm_out = call_openrouter_chat(api_key, model, q, context_for_llm, tables_json)
-#             results.append({
-#                 "question": q,
-#                 "context_used": [{"chunk": c, "score": s} for c, s in similar],
-#                 "answer": llm_out
-#             })
-#         except Exception as e:
-#             results.append({"question": q, "error": str(e)})
-
-#     return JSONResponse(content={
-#         "mode": "web_or_csv_analysis",
-#         "elapsed_time_seconds": time.time() - start_time,
-#         "saved_as": file_path,
-#         "url": url,
-#         "page_saved_as": page_file if url else None,
-#         "csv_used": csv_file.filename if not url else None,
-#         "questions_count": len(questions),
-#         "results": results
-#     })
-
-
-
-
-######################################################## above the code is working code ########################################################
-
 import os
 import io
 import json
@@ -768,7 +47,6 @@ app.add_middleware(
 
 SUPPORTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"]
 
-# DuckDB setup (persistent file in EMBED_DIR)
 DUCKDB_PATH = os.path.join(EMBED_DIR, "embeddings.duckdb")
 con = duckdb.connect(DUCKDB_PATH)
 con.execute("""
@@ -779,7 +57,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
 )
 """)
 
-# ---------------- Helpers ----------------
 def read_questions_file(file_bytes: bytes) -> Tuple[str, List[str]]:
     try:
         content = file_bytes.decode("utf-8", errors="ignore").strip()
@@ -832,13 +109,12 @@ def build_duckdb_index(chunks: List[str]):
         return None
     embs = embedding_model.encode(chunks, convert_to_numpy=True)
     embs /= np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
-    con.execute("DELETE FROM embeddings")  # Clear previous embeddings
+    con.execute("DELETE FROM embeddings")  
     for i, vec in enumerate(embs):
         con.execute("INSERT INTO embeddings VALUES (?, ?, ?)", (i, chunks[i], vec.astype(np.float32).tobytes()))
     return chunks
 
 def search_similar_chunks(query: str, index, chunks: List[str], top_k: int = 5):
-    # index and chunks kept for compatibility; index is just placeholder in this DuckDB refactor
     q_emb = embedding_model.encode([query], convert_to_numpy=True)[0]
     q_emb /= np.linalg.norm(q_emb) + 1e-12
     res = con.execute("SELECT chunk_id, text, vector FROM embeddings").fetchall()
@@ -902,13 +178,11 @@ def create_scatter_base64(x: List[float], y: List[float], title: str = "Scatter"
     buf.seek(0)
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}", slope, intercept, corr
 
-# image-question heuristic
 def is_image_question(q: str) -> bool:
     ql = q.lower()
     keywords = ["image", "photo", "picture", "identify", "what is", "what's in", "who is", "read", "ocr", "color", "how many", "is this", "does this", "look", "see"]
     return any(k in ql for k in keywords)
 
-# ---------------- OpenRouter calls (api_key stripped) ----------------
 def call_openrouter_chat(api_key: str, model: str, question: str, context_text: str, tables_json: List[dict]):
     context_text = truncate_context(context_text)
     headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"}
@@ -949,7 +223,6 @@ def call_openrouter_image(api_key: str, image_b64: str, questions: List[str]):
         "{\"answers\": [\"...\"], \"computed\": {}, \"image\": null, \"sources\": [], \"warnings\": [], \"requires_external_data\": false}"
     )
 
-    # Combine all user questions into one block
     questions_str = "\n".join([f"- {q}" for q in questions])
 
     payload = {
@@ -983,7 +256,6 @@ def call_openrouter_image(api_key: str, image_b64: str, questions: List[str]):
     data = resp.json()
 
     try:
-        # OpenRouter responses may contain Markdown wrapping JSON → clean it
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, str):
             content = content.replace("```json", "").replace("```", "").strip()
@@ -994,7 +266,6 @@ def call_openrouter_image(api_key: str, image_b64: str, questions: List[str]):
 
 
 
-# ---------------- Upload endpoint ----------------
 @app.post("/upload")
 async def upload_questions(
     file: UploadFile = File(...),
@@ -1006,7 +277,6 @@ async def upload_questions(
 ):
     start_time = time.time()
 
-    # Clear previous uploaded/page files (do NOT remove the DuckDB database file)
     for folder in [UPLOAD_DIR, PAGE_DIR]:
         for f in os.listdir(folder):
             try:
@@ -1027,17 +297,14 @@ async def upload_questions(
     if not lines:
         raise HTTPException(status_code=400, detail="questions.txt is empty")
 
-    # detect URL from any line in the file
     url = None
     for line in lines:
         if line.startswith("http://") or line.startswith("https://"):
             url = line
             break
 
-    # all non-URL lines are considered questions
     questions = [l for l in lines if not (l.startswith("http://") or l.startswith("https://"))]
 
-    # read optional image once (if provided)
     image_b64 = None
     if image_file:
         if image_file.content_type not in SUPPORTED_IMAGE_TYPES:
@@ -1045,7 +312,6 @@ async def upload_questions(
         image_bytes = await image_file.read()
         image_b64 = image_to_base64(image_bytes)
 
-    # read optional CSV if provided
     tables: List[pd.DataFrame] = []
     page_text = ""
     page_file = None
@@ -1069,16 +335,13 @@ async def upload_questions(
 
     safe_name = (url or (csv_file.filename if csv_file else "no_source")).replace("://", "_").replace("/", "_")[:120]
 
-    # Build DuckDB index if we have textual chunks (from URL scraping)
     index = build_duckdb_index(chunks) if chunks else None
 
-    # prepare tables JSON for LLM
     tables_json = [{"columns": df.columns.tolist(), "rows": df.fillna("").to_dict(orient="records")} for df in tables]
 
     results = []
     for q in questions:
         try:
-            # 1) plot requests (from tables)
             if detect_plot_request(q):
                 x_ser, y_ser, reason = select_xy_from_tables(q, tables)
                 if x_ser is not None and y_ser is not None and len(x_ser) >= 2:
@@ -1096,17 +359,14 @@ async def upload_questions(
                     })
                     continue
 
-            # 2) build context from chunks (if any)
             context_for_llm = ""
             similar = []
             if index:
                 similar = search_similar_chunks(q, index, chunks, top_k)
                 context_for_llm = "\n\n".join([c for c, s in similar])
 
-            # 3) image-focused questions -> call image analyzer (if image provided)
             if image_b64 and is_image_question(q):
                 img_response = call_openrouter_image(api_key, image_b64, [q])
-                # return image model output as answer
                 results.append({
                     "question": q,
                     "context_used": [{"chunk": c, "score": s} for c, s in similar],
@@ -1114,7 +374,6 @@ async def upload_questions(
                 })
                 continue
 
-            # 4) default -> text LLM with context and tables
             llm_out = call_openrouter_chat(api_key, model, q, context_for_llm, tables_json)
             results.append({
                 "question": q,
@@ -1134,3 +393,4 @@ async def upload_questions(
         "questions_count": len(questions),
         "results": results
     })
+
