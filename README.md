@@ -48,6 +48,7 @@ Perfect for researchers, analysts, and developers who need to **interact with we
 
 ```bash
 git clone https://github.com/sakthi-cannyfore/Data-Analyst-Agent-With-AI.git
+cd Data-Analyst-Agent-With-AI
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
