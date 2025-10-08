@@ -55,10 +55,10 @@
       if (csvFile) formData.append("csv_file", csvFile);
       if (imgFile) formData.append("image_file", imgFile);
 
-      document.getElementById("response_area").innerHTML = "Processing... ⏳";
-
+      document.getElementById("response_area").innerHTML = "Processing... ";
+      //https://unretributory-yvonne-unexcusably.ngrok-free.dev/api
       try {
-        const res = await fetch("https://unretributory-yvonne-unexcusably.ngrok-free.dev/api", {
+        const res = await fetch("http://127.0.0.1:8000/api", {
           method: "POST",
           body: formData,
         });
@@ -158,5 +158,6 @@
     }
   </script>
 </body>
+
 
 </html>
