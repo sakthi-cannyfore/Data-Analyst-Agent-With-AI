@@ -1,0 +1,6 @@
+https://en.wikipedia.org/wiki/List_of_largest_companies_in_the_United_States_by_revenue
+
+Which company has the highest revenue?
+How many companies have revenue over $200 billion?
+Which company ranked #10 and what is its industry?
+Scatterplot Rank vs Revenue with regression line.
